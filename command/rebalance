@@ -1,0 +1,300 @@
+#!/usr/bin/python3
+#-*-python-*-##################################################################
+# Copyright 2021 - 2023 Inesonic, LLC
+# 
+# This file is licensed under two licenses.
+#
+# Inesonic Commercial License, Version 1:
+#   All rights reserved.  Inesonic, LLC retains all rights to this software,
+#   including the right to relicense the software in source or binary formats
+#   under different terms.  Unauthorized use under the terms of this license is
+#   strictly prohibited.
+#
+# GNU Public License, Version 3:
+#   This program is free software: you can redistribute it and/or modify it
+#   under the terms of the GNU General Public License as published by the Free
+#   Software Foundation, either version 3 of the License, or (at your option)
+#   any later version.
+#   
+#   This program is distributed in the hope that it will be useful, but WITHOUT
+#   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+#   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+#   more details.
+#   
+#   You should have received a copy of the GNU General Public License along
+#   with this program.  If not, see <https://www.gnu.org/licenses/>.
+###############################################################################
+
+"""
+Python command-line tool that redistributes customer workloads across all
+available regions.
+
+"""
+
+###############################################################################
+# Import:
+#
+
+import sys
+import os
+import json
+import base64
+import argparse
+import random
+import time
+import sys
+
+import libraries.customers as customers
+import libraries.regions as regions
+import libraries.servers as servers
+import libraries.customer_mapping as customer_mapping
+
+import libraries.rest_api_common_v1 as rest_api_common_v1
+import libraries.outbound_rest_api_v1 as outbound_rest_api_v1
+
+###############################################################################
+# Globals:
+#
+
+VERSION = "1a"
+"""
+The SpeeedSentry command line version.
+
+"""
+
+DESCRIPTION = """
+Copyright 2021-2023 Inesonic, LLC
+
+You can use this command line tool to perform rebalancing of customers after
+adding a new region.  The tool, by design runs slowly so that the DbC is not
+overly burdened.
+
+"""
+
+DEFAULT_CONFIGURATION_FILE = os.path.join(
+    os.path.expanduser("~"),
+    ".speedsentry_config.json"
+)
+"""
+The default configuration file.
+
+"""
+
+HELP_HEADER = """
+Copyright 2021 - 2023 Inesonic, LLC
+All Rights Reserved
+
+You can use this command line tool to rebalance customers across regions.
+
+"""
+
+DEFAULT_UPDATE_PERIOD = 1000
+"""
+The default update period, in milliseconds.
+
+"""
+
+###############################################################################
+# Main:
+#
+
+command_line_parser = argparse.ArgumentParser(description = DESCRIPTION)
+
+command_line_parser.add_argument(
+    "-v",
+    "--version",
+    action = 'version',
+    version = VERSION
+)
+
+command_line_parser.add_argument(
+    "-c",
+    "--configuration",
+    help = "You can use this switch to specify the path to the "
+           "configuration file.  If not specified, then %s is assumed."%(
+               DEFAULT_CONFIGURATION_FILE
+            ),
+    type = str,
+    default = DEFAULT_CONFIGURATION_FILE,
+    dest = 'configuration_file'
+)
+
+command_line_parser.add_argument(
+    "-p",
+    "--period",
+    help = "You can use this switch to specify the period between customers "
+           "during rebalancing.  Value is in milliseconds.  If not specified, "
+           "then %d mSec is used."%DEFAULT_UPDATE_PERIOD,
+    type = str,
+    default = DEFAULT_UPDATE_PERIOD,
+    dest = 'update_period'
+)
+
+command_line_parser.add_argument(
+    "customer_ids",
+    help = "An optional list of customer IDs to be updated.  An empty list "
+           "means all multi-region customers.",
+    type = int,
+    nargs = "*"
+)
+
+
+arguments = command_line_parser.parse_args()
+configuration_file = arguments.configuration_file
+update_period = arguments.update_period
+customer_ids = arguments.customer_ids
+
+
+success = True
+try:
+    with open(configuration_file, 'r') as jfh:
+        json_config = jfh.read()
+except Exception as e:
+    success = False
+    sys.stderr.write(
+        "*** Could not read configuration file: %s\n"%str(e)
+    )
+
+if success:
+    try:
+        configuration = json.loads(json_config)
+    except Exception as e:
+        success = False
+        sys.stderr.write(
+            "*** Invalid JSON configuration: %s\n"%str(e)
+        )
+
+if success:
+    if 'secret' in configuration:
+        secret_str = str(configuration['secret'])
+        try:
+            secret = base64.b64decode(secret_str.encode('utf-8'))
+        except Exception as e:
+            success = False
+            sys.stderr.write(
+                "*** Configuration API key must be base-64 encoded.\n"
+            )
+
+        if success:
+            if len(secret) != outbound_rest_api_v1.SECRET_LENGTH:
+                success = False
+                sys.stderr.write(
+                    "*** Secret must be %d bytes in length.\n"%(
+                        outbound_rest_api_v1.SECRET_LENGTH
+                    )
+                )
+    else:
+        success = False
+        sys.stderr.write(
+            "*** Configuration missing 'secret'.\n"
+        )
+
+if success:
+    if 'host' in configuration:
+        scheme_and_host = configuration['host']
+    else:
+        success = False
+        sys.stderr.write(
+            "*** Configuration missing 'host'.\n"
+        )
+
+if success:
+    rest_api = outbound_rest_api_v1.Server(scheme_and_host)
+
+    if not customer_ids:
+        customers_data = customers.Customers(rest_api, secret).get_all()
+        customer_ids = list()
+        for customer_id, customer_data in customers_data.items():
+            if customer_data.multi_region_checking:
+                customer_ids.append(customer_data.customer_id)
+
+    number_customers = len(customer_ids)
+
+if success and number_customers > 0:
+    active_servers = servers.Servers(
+        rest_api,
+        secret
+    ).list(
+        status = servers.STATUS.ACTIVE
+    )
+
+    servers_by_region = dict()
+    servers_by_id = dict()
+    for active_server in active_servers:
+        servers_by_id[active_server.server_id] = active_server
+        if active_server.region_id in servers_by_region:
+            servers_by_region[active_server.region_id].append(active_server)
+        else:
+            servers_by_region[active_server.region_id] = [ active_server ]
+
+    number_regions = len(servers_by_region)
+    active_regions = set(servers_by_region.keys())
+
+    sys.stdout.write(
+        "Redistributing %d customers across %d regions:\n"%(
+            number_customers,
+            number_regions
+        )
+    )
+
+rng = random.Random(int(time.time()))
+cm = customer_mapping.CustomerMapping(rest_api, secret)
+
+customer_index = 0
+while success and customer_index < number_customers:
+    customer_id = customer_ids[customer_index]
+
+    current_mapping = cm.get(customer_id = customer_id)
+    if len(current_mapping) < number_regions:
+        customer_regions = set()
+        for server_id in current_mapping:
+            srv = servers_by_id[server_id]
+            customer_regions.add(srv.region_id)
+
+        missing_regions = list(active_regions - customer_regions)
+
+        servers_to_add = list()
+        new_mapping = current_mapping
+        for missing_region in missing_regions:
+            servers_this_region = servers_by_region[missing_region]
+            sn = rng.randint(0, len(servers_this_region) - 1)
+
+            srv = servers_this_region[sn]
+
+            servers_to_add.append(srv)
+            new_mapping.add(srv.server_id)
+
+        cm.update(
+            customer_id,
+            new_mapping.primary_server_id,
+            new_mapping
+        )
+
+        cm.activate(customer_id)
+
+        sys.stdout.write(
+            "    %d - Redistributed to include regions %s:\n"%(
+                customer_id,
+                ' '.join([ str(x) for x in missing_regions ])
+            )
+        )
+        for srv in servers_to_add:
+            sys.stdout.write(
+                "        Region %d: %d - %s\n"%(
+                    srv.region_id,
+                    srv.server_id,
+                    srv.identifier
+                )
+            )
+    else:
+        sys.stdout.write("    %d - No change needed.\n"%(customer_id))
+
+    time.sleep(update_period / 1000.0)
+    customer_index += 1
+
+if success:
+    exit_code = 0
+else:
+    exit_code = 1
+
+exit(exit_code)

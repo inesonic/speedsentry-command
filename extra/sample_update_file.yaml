@@ -1,0 +1,19 @@
+0 :
+  uri : https://inesonic.com
+1 :
+  uri : /pricing
+  content_check_mode : smart_content_match
+2 :
+  uri : /product
+  content_check_mode : all_keywords
+  keywords :
+    - Q29tcGlsZWQ=
+    - RG9jdW1lbnRhdGlvbg==
+    - U2VjdXJpdHk=
+    - SW50ZWdyYXRpb24=
+3 :
+  uri : /rest
+  method : post
+  post_content_type : json
+  post_content : eyJjdXN0b21lcl9pZCI6IDI1LCAibmV3X3N0YXR1cyI6ICJpbmFjdGl2ZSJ9
+  post_user_agent : "Inesonic, LLC"

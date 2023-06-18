@@ -1,0 +1,193 @@
+#!/usr/bin/python3
+#-*-python-*-##################################################################
+# Copyright 2021 - 2023 Inesonic, LLC
+# 
+# This file is licensed under two licenses.
+#
+# Inesonic Commercial License, Version 1:
+#   All rights reserved.  Inesonic, LLC retains all rights to this software,
+#   including the right to relicense the software in source or binary formats
+#   under different terms.  Unauthorized use under the terms of this license is
+#   strictly prohibited.
+#
+# GNU Public License, Version 3:
+#   This program is free software: you can redistribute it and/or modify it
+#   under the terms of the GNU General Public License as published by the Free
+#   Software Foundation, either version 3 of the License, or (at your option)
+#   any later version.
+#   
+#   This program is distributed in the hope that it will be useful, but WITHOUT
+#   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+#   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+#   more details.
+#   
+#   You should have received a copy of the GNU General Public License along
+#   with this program.  If not, see <https://www.gnu.org/licenses/>.
+###############################################################################
+
+"""
+Python command-line tool to request a rollup email be generated.
+
+"""
+
+###############################################################################
+# Import:
+#
+
+import sys
+import os
+import json
+import base64
+import inspect
+import importlib
+import argparse
+import getpass
+import sys
+import os
+import json
+
+import libraries.rest_api_common_v1 as rest_api_common_v1
+import libraries.outbound_rest_api_v1 as outbound_rest_api_v1
+
+###############################################################################
+# Globals:
+#
+
+VERSION = "1a"
+"""
+The Rollup-Requester command line version.
+
+"""
+
+DESCRIPTION = """
+Copyright 2021 - 2023 Inesonic, LLC
+All Rights Reserved
+
+You can use this small command line too to trigger rollups.
+
+"""
+
+DEFAULT_CONFIGURATION_FILE = os.path.join(
+    os.path.expanduser("~"),
+    ".speedsentry_config.json"
+)
+"""
+The default configuration file.
+
+"""
+
+TRIGGER_ENDPOINT = "/rollups/trigger"
+"""
+The endpoint to send rollup requests to.
+
+"""
+
+HELP_HEADER = """
+Copyright 2021-2023 Inesonic, LLC
+
+You can use this command line tool to trigger rollup emails to a given user.
+
+"""
+
+###############################################################################
+# Main:
+#
+
+command_line_parser = argparse.ArgumentParser(description = DESCRIPTION)
+
+command_line_parser.add_argument(
+    "-v",
+    "--version",
+    action = 'version',
+    version = VERSION
+)
+
+command_line_parser.add_argument(
+    "-c",
+    "--configuration",
+    help = "You can use this switch to specify the path to the "
+           "configuration file.  If not specified, then %s is assumed."%(
+               DEFAULT_CONFIGURATION_FILE
+            ),
+    type = str,
+    default = DEFAULT_CONFIGURATION_FILE,
+    dest = 'configuration_file'
+)
+
+command_line_parser.add_argument(
+    "customer_ids",
+    help = "The customer IDs to limit the rollups to.",
+    type = int,
+    nargs = "*"
+)
+
+arguments = command_line_parser.parse_args()
+configuration_file = arguments.configuration_file
+customer_ids = arguments.customer_ids
+
+success = True
+try:
+    with open(configuration_file, 'r') as jfh:
+        json_config = jfh.read()
+except Exception as e:
+    success = False
+    sys.stderr.write(
+        "*** Could not read configuration file: %s\n"%str(e)
+    )
+
+if success:
+    try:
+        configuration = json.loads(json_config)
+    except Exception as e:
+        success = False
+        sys.stderr.write(
+            "*** Invalid JSON configuration: %s\n"%str(e)
+        )
+
+if success:
+    if 'autonoma' in configuration:
+        autonoma_url = configuration['autonoma']
+    else:
+        success = False
+        sys.stderr.write(
+            "*** Configuration missing 'autonoma'.\n"
+        )
+
+if success:
+    if 'rollups_secret' in configuration:
+        rollups_secret_str = str(configuration['rollups_secret'])
+    else:
+        success = False
+        sys.stderr.write(
+            "*** Configuration missing 'rollups_secret'.\n"
+        )
+
+if success:
+    try:
+        rollups_secret = base64.b64decode(rollups_secret_str, validate = True)
+    except Exception as e:
+        success = False
+        sys.stderr.write(
+            "*** Invalid rollups secret.\n"
+        )
+
+if success:
+    rest_api = outbound_rest_api_v1.Server(
+        scheme_and_host = autonoma_url,
+        time_delta_slug = '/rollups/td'
+    )
+
+    if customer_ids:
+        message = { 'customer_ids' : customer_ids }
+    else:
+        message = dict()
+
+    result = rest_api.post_message(TRIGGER_ENDPOINT, rollups_secret, message)
+    print(json.dumps(result, indent = 4))
+
+if success:
+    exit_code = 0
+else:
+    exit_code = 1
+
+exit(exit_code)

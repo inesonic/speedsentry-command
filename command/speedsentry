@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+#-*-python-*-##################################################################
+# Copyright 2021 - 2023 Inesonic, LLC
+# 
+# This file is licensed under two licenses.
+#
+# Inesonic Commercial License, Version 1:
+#   All rights reserved.  Inesonic, LLC retains all rights to this software,
+#   including the right to relicense the software in source or binary formats
+#   under different terms.  Unauthorized use under the terms of this license is
+#   strictly prohibited.
+#
+# GNU Public License, Version 3:
+#   This program is free software: you can redistribute it and/or modify it
+#   under the terms of the GNU General Public License as published by the Free
+#   Software Foundation, either version 3 of the License, or (at your option)
+#   any later version.
+#   
+#   This program is distributed in the hope that it will be useful, but WITHOUT
+#   ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+#   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+#   more details.
+#   
+#   You should have received a copy of the GNU General Public License along
+#   with this program.  If not, see <https://www.gnu.org/licenses/>.
+###############################################################################
+
+"""
+Python command-line tool to manage the SpeedSentry backend logic.
+
+"""
+
+###############################################################################
+# Import:
+#
+
+import sys
+import os
+import json
+import base64
+import inspect
+import importlib
+import argparse
+import getpass
+import sys
+import os
+import json
+
+import libraries.rest_api_common_v1 as rest_api_common_v1
+import libraries.outbound_rest_api_v1 as outbound_rest_api_v1
+
+###############################################################################
+# Globals:
+#
+
+VERSION = "1a"
+"""
+The SpeedSentry command line version.
+
+"""
+
+DESCRIPTION = """
+Copyright 2021-2023 Inesonic, LLC
+All Rights Reserved
+
+You can use this command line tool to manage the SpeedSentry backend servers
+and the regions the servers reside within.
+
+This tool supports a large number of commands.  For details, type
+"speedsentry help".
+
+"""
+
+DEFAULT_CONFIGURATION_FILE = os.path.join(
+    os.path.expanduser("~"),
+    ".speedsentry_config.json"
+)
+"""
+The default configuration file.
+
+"""
+
+HELP_HEADER = """
+Copyright 2021-2023 Inesonic, LLC
+
+You can use this command line tool to manage the SpeedSentry backend servers
+and the regions the servers reside within.
+
+"""
+
+###############################################################################
+# Main:
+#
+
+module_directory = os.path.dirname(inspect.getfile(inspect.currentframe()))
+if not module_directory:
+    module_directory = "."
+
+all_files = os.listdir(module_directory)
+add_arguments = list()
+commands = dict()
+
+for file in all_files:
+    if file.startswith("speedsentry_") and file.endswith(".py"):
+        ( name, ext ) = os.path.splitext(file)
+        m = importlib.import_module(name)
+
+        module_commands = m.COMMANDS
+        module_add_arguments = m.ADD_ARGUMENTS
+
+        if module_add_arguments is not None:
+            add_arguments.append(module_add_arguments)
+
+        commands.update(module_commands)
+
+command_line_parser = argparse.ArgumentParser(description = DESCRIPTION)
+
+command_line_parser.add_argument(
+    "-v",
+    "--version",
+    action = 'version',
+    version = VERSION
+)
+
+command_line_parser.add_argument(
+    "-c",
+    "--configuration",
+    help = "You can use this switch to specify the path to the "
+           "configuration file.  If not specified, then %s is assumed."%(
+               DEFAULT_CONFIGURATION_FILE
+            ),
+    type = str,
+    default = DEFAULT_CONFIGURATION_FILE,
+    dest = 'configuration_file'
+)
+
+command_line_parser.add_argument(
+    "command",
+    help = "Script commands.  Use the \"help\" command for details.",
+    type = str,
+    nargs = "+"
+)
+
+for fn in add_arguments:
+    fn(command_line_parser)
+
+arguments = command_line_parser.parse_args()
+configuration_file = arguments.configuration_file
+positional_arguments = arguments.command
+
+success = True
+try:
+    with open(configuration_file, 'r') as jfh:
+        json_config = jfh.read()
+except Exception as e:
+    success = False
+    sys.stderr.write(
+        "*** Could not read configuration file: %s\n"%str(e)
+    )
+
+if success:
+    try:
+        configuration = json.loads(json_config)
+    except Exception as e:
+        success = False
+        sys.stderr.write(
+            "*** Invalid JSON configuration: %s\n"%str(e)
+        )
+
+if success:
+    if 'secret' in configuration:
+        secret_str = str(configuration['secret'])
+        try:
+            secret = base64.b64decode(secret_str.encode('utf-8'))
+        except Exception as e:
+            success = False
+            sys.stderr.write(
+                "*** Configuration API key must be base-64 encoded.\n"
+            )
+
+        if success:
+            if len(secret) != outbound_rest_api_v1.SECRET_LENGTH:
+                success = False
+                sys.stderr.write(
+                    "*** Secret must be %d bytes in length.\n"%(
+                        outbound_rest_api_v1.SECRET_LENGTH
+                    )
+                )
+    else:
+        success = False
+        sys.stderr.write(
+            "*** Configuration missing 'secret'.\n"
+        )
+
+if success:
+    if 'host' in configuration:
+        scheme_and_host = configuration['host']
+    else:
+        success = False
+        sys.stderr.write(
+            "*** Configuration missing 'host'.\n"
+        )
+
+if success:
+    rest_api = outbound_rest_api_v1.Server(scheme_and_host)
+
+    command = positional_arguments[0]
+    if command == 'help':
+        if len(positional_arguments) == 1:
+            sys.stdout.write(HELP_HEADER)
+            sys.stdout.write(
+                "The SpeedSentry tool supports the following commands:\n\n"
+            )
+
+            brief_descriptions = list()
+            maximum_command_length = len("help")
+            for command_name, command_data in commands.items():
+                brief_descriptions.append(
+                    ( command_name, command_data['brief'] )
+                )
+
+                maximum_command_length = max(
+                    maximum_command_length,
+                    len(command_name)
+                )
+
+            brief_descriptions.append(
+                (
+                    "help",
+                    "Displays help about commands."
+                )
+            )
+
+            brief_descriptions.sort(key = lambda x: x[0])
+            fmt_string = "    %%-%ds %%s\n"%(maximum_command_length + 2)
+            for name, brief in brief_descriptions:
+                sys.stdout.write(fmt_string%(name + " -", brief))
+
+            sys.stdout.write(
+                "\nFor details on individual commands type speedsentry help "
+                "<command>.\n"
+            )
+        elif len(positional_arguments) == 2:
+            command_for_help = positional_arguments[1]
+            if command_for_help in commands:
+                help_text = commands[command_for_help]['help']
+                sys.stdout.write(HELP_HEADER)
+                sys.stdout.write(help_text)
+            else:
+                sys.stderr.write("*** Unknown command %s\n"%command_for_help)
+                success = False;
+        elif len(positional_arguments) == 3:
+            command_for_help = positional_arguments[1]
+            subcommand_for_help = positional_arguments[2]
+            if command_for_help in commands:
+                subcommands = commands[command_for_help]['subcommands']
+                if subcommand_for_help in subcommands:
+                    subcommand_data = subcommands[subcommand_for_help]
+                    help_text = subcommand_data['help']
+                    sys.stdout.write(HELP_HEADER)
+                    sys.stdout.write(help_text);
+                else:
+                    sys.stderr.write(
+                        "*** Unknown subcommand %s %s\n"%(
+                            command_for_help,
+                            subcommand_for_help
+                        )
+                    )
+                    success = False;
+            else:
+                sys.stderr.write("*** Unknown command %s\n"%command_for_help)
+                success = False;
+    elif command in commands:
+        command_data = commands[command]
+        if 'execute' in command_data:
+            execute_function = command_data['execute']
+            success = execute_function(
+                positional_arguments[2:],
+                arguments,
+                rest_api,
+                secret
+            )
+        elif 'subcommands' in command_data and \
+             len(positional_arguments) >= 2    :
+            subcommand = positional_arguments[1]
+            subcommands_data = command_data['subcommands']
+            if subcommand in subcommands_data:
+                subcommand_data = subcommands_data[subcommand]
+                execute_function = subcommand_data['execute']
+                success = execute_function(
+                    positional_arguments[2:],
+                    arguments,
+                    rest_api,
+                    secret
+                )
+            else:
+                sys.stderr.write(
+                    "*** Unknown command %s %s\n"%(
+                        command,
+                        subcommand
+                    )
+                )
+                success = False
+    else:
+        sys.stderr.write("*** Unknown command %s\n"%command)
+        success = False
+
+if success:
+    exit_code = 0
+else:
+    exit_code = 1
+
+exit(exit_code)
